@@ -33,14 +33,9 @@ class CODA:
 		"""
 		# Sanity checking parameters
 		if not (isinstance(n_outliers, float) and n_outliers > 0 and n_outliers < 1) \
-			or isinstance(n_outliers, int):
+			and not isinstance(n_outliers, int):
 			raise ValueError('n_outliers must be an int or a float in [0,1]')
-
-		if generating_distribution=='independent': # ln(P(A,B,C)) = ln(P(A)*P(B)*P(C)) = ln(P(A)) + ln(P(B)) + ln(P(C))
-			self.logP = self.__gaussians_and_multinomials
-		elif generating_distribution=='distance': # ln(P(A,B,C)) = ln(e^distance((A,B,C) - mu)) = distance((A,B,C) - mu)
-			self.logP = self.__radial_basis_function
-		else:
+		if not generating_distribution in ['independent', 'distance']:
 			raise ValueError("generating_distribution should be in {'independent', 'distance'}")
 
 		# Set all those params to be attributes of the object, without having to do each one individually
@@ -50,35 +45,50 @@ class CODA:
 
 		# Based on what is in S and the generating distribution specified, I have to decide how to model the observable
 		# random variables X with distributions P and parameters Theta.
+
 		# First step is to infer which attributes in S are numerical and which are categorical. For categoricals, it
-		# becomes important to know how many possible settings each one has.
-		self.is_categorical = (S.dtypes == 'category') | (S.dtypes == 'O') | (S.dtypes == 'bool') # pandas Series
+		# becomes important to know how many possible settings each one has, and for the 'distance' case it's important
+		# each one have a specific index
+		self.is_categorical = (S.dtypes == 'category') | (S.dtypes == 'O') # pandas Series
 		self.categorical_ndx = {}
-		for col, v in categorical.iteritems():
+		for col, v in is_categorical.iteritems():
 			if v: categorical_ndx[col] = dict({x:i for i,x in enumerate(S[col].unique())}) # map unique values -> indices
 
-		self.Theta = None # will get initialized at first Maximization step
+		# Next, define the proper distribution. That means both the function and the parameters that lock its shape.
+		if generating_distribution=='independent': # ln(P(A,B,C)) = ln(P(A)*P(B)*P(C)) = ln(P(A)) + ln(P(B)) + ln(P(C))
+			self.logP = self.__gaussians_and_multinomials
+			# Theta[k] = parameters for the kth community. kth community params = a dictionary of column name ->
+			# parameters for that attribute. Parameters for a categorical column is a further dictionary of choice -> %.
+			# Parameters for a numerical column are (mu, sigma^2)
+			self.Theta = {col: {} if is_categorical[col] else None for col in S} # will get filled at first Maximization step
+		else: # ln(P(A,B,C)) = ln(e^distance((A,B,C) - mu)) = distance((A,B,C) - mu)
+			self.logP = self.__radial_basis_function
 
-	def run(self):
+			self.Theta = None # not sure yet
+			
+
+	def run(self) -> Tuple[numpy.ndarray, numpy.ndarray]:
 		"""Run the optimization procedure and return an answer
 		
 		:returns: The indices and energies (relative anomalousness measure) of outliers
 		"""
 
-		Z_prev = numpy.random.choice(numpy.arange(1, self.K+1), size=len(self.S)) # random assignment
-		Z_t = # be careful. One choice is just to run the algorithm multiple times with different initialization here.
+		Z_prev = numpy.zeros(len(self.S)) # the point is just to be far from Z_t for first while loop condition check
+		Z_t = numpy.random.choice(numpy.arange(1, self.K+1), size=len(self.S)) # random assignment
+		# be careful. One choice is just to run the algorithm multiple times with different initialization here.
 
-		while numpy.mean(Z_t != Z_prev) > 0.1 # Z_t not close enough to Z_prev. Here I'm saying no more than 10% can
+		while numpy.mean(Z_t != Z_prev) > 0.1: # Z_t not close enough to Z_prev. Here I'm saying no more than 10% can
 			#have different class. Is there a better cutoff for this iteration?
+			Z_prev = Z_t
 
 			# M_step: choose model parameters for generating distribution(s), assuming assignment
+			self._Q_argmax(Z_t)
 			
-			Z_t = Z_prev # somewhere in here
-
 			# E_step: choose assignment, assuming model parameters
 			Z_t, U = self._icm(Z_t)
 
-		return # indices of outliers + ranking
+		outlier_ndxs = numpy.where(Z_t == 0)
+		return outlier_ndxs, U[outlier_ndxs] # indices of outliers + energies
 
 
 	def _icm(self, Z_t: numpy.ndarray) -> Tuple[numpy.ndarray, numpy.ndarray]:
@@ -157,15 +167,32 @@ class CODA:
 		"""
 		if self.generating_distribution=='independent': # ln(P(A,B,C)) = ln(P(A)*P(B)*P(C)) = ln(P(A)) + ln(P(B)) + ln(P(C))
 
-			
+			for k in range(1, self.K+1): # for k in 1..K, "for each cluster"
+				# Inside here we're really only going to be operating over nodes with class k
+				community = S.iloc[Z_t == k] # dataframe only of nodes belonging to the kth cluster. Makes a copy.
+
+				for col,meow in self.is_categorical.iteritems():
+					if meow: # If the attribute in this column is a cat (categorical), then we're dealing with a multinomial.
+						for choice in categorical_ndx[col]:
+							self.Theta[k][col][choice] = sum(community[col] == choice)/len(community)
+					else: # then we're modeling this attribute with a Gaussian
+						self.Theta[k][col] = (community[col].mean(), community[col].var())
+
 		else: # 'distance': # ln(P(A,B,C)) = ln(e^distance((A,B,C) - mu)) = distance((A,B,C) - mu)
-			pass # TODO
+			for k in range(1, self.K+1):
+				community = S.iloc[Z_t == k]
+
+				# TODO: find mean and covariance
+				self.Theta[k] = (mu, Sigma)
 
 
 	### generator distributions ###
 
 	def __gaussians_and_multinomials(self, s_i: pandas.core.series.Series, theta_k: dict):
-		"""
+		"""This is for the independent case, where ln(P(A,B,C)) = ln(P(A)*P(B)*P(C)) = ln(P(A)) + ln(P(B)) + ln(P(C))
+		Here in the numerical case: ln P(A=a | z=k, Theta) = ln univariate_gaussian(A, theta_k) = a one-line equation
+		And in the categorical case: ln P(B=b | z=k, Theta) = ln P(B=b | theta_k) = ln theta_k[b] =
+			ln |B=b|/|B=anything| = log of the parameter itself
 
 		:param s_i: data corresponding to a particular node
 		:theta_k: distribution parameters for the kth cluster
