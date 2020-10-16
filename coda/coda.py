@@ -52,21 +52,47 @@ class CODA:
 		# each one have a specific index
 		self.is_categorical = (S.dtypes == 'category') | (S.dtypes == 'O') # pandas Series
 		self.categorical_ndx = {}
-		for col, v in is_categorical.iteritems():
-			if v: categorical_ndx[col] = dict({x:i for i,x in enumerate(S[col].unique())}) # map unique values -> indices
+		for col,meow in is_categorical.iteritems():
+			if meow: categorical_ndx[col] = {x:i for i,x in enumerate(S[col].unique())} # map unique values -> indices
 
 		# Next, define the proper distribution. That means both the function and the parameters that lock its shape.
 		if generating_distribution=='independent': # ln(P(A,B,C)) = ln(P(A)*P(B)*P(C)) = ln(P(A)) + ln(P(B)) + ln(P(C))
 			self.logP = self.__gaussians_and_multinomials
 			# Theta[k] = parameters for the kth community. kth community params = a dictionary of column name ->
 			# parameters for that attribute. Parameters for a categorical column is a further dictionary of choice -> %.
-			# Parameters for a numerical column are (mu, sigma^2)
-			self.Theta = {col: {} if is_categorical[col] else None for col in S} # will get filled at first Maximization step
-		else: # ln(P(A,B,C)) = ln(e^distance((A,B,C) - mu)) = distance((A,B,C) - mu)
+			# Parameters for a numerical column are (mu, sigma^2). Values will get populated at first Maximization step.
+			self.Theta = [{col: {} if is_categorical[col] else None for col in S} for k in range(K)]
+		
+		else: # generating_distribution=='distance': ln(P(A,B,C)) = ln(e^distance((A,B,C) - mu)) = distance((A,B,C) - mu)
 			self.logP = self.__radial_basis_function
 
-			self.Theta = None # not sure yet
+			# Theta[k] in this case is (mu, Sigma), where mu is a vector and Sigma is a covariance matrix. Values will
+			# get populated at first Maximization step.
+			self.Theta = [None for k in range(K)]
 			
+			# All categorical inputs need to be transformed to simplex vertex coordinates. Instead of doing this
+			# numerous times dynamically below, every time I need to take a distance, it's probably better to just
+			# sacrifice the extra memory and do the transformation once. Memory is cheap.
+			# Because S' is completely numerical, I can do away with the DataFrame and let attributes be stored in a
+			# numpy array. The width needed for each new attribute vector is 1 for each standard not-categorical
+			# attribute and |choices|-1 for each categorical attribute.
+			width = sum([len(categorical_ndx[col])-1 if meow else 1 for col,meow in is_categorical.iteritems()])
+			Sprime = numpy.zeros((len(S), width))
+
+			j = 0 # keep track of which column we're filling in S'
+			for col,meow in is_categorical.iteritems(): # fill S'
+				if meow: # categorical case -> have to transform to simplex vertices
+					w = len(categorical_ndx[col])-1 # the number of columns required to represent this variable
+					vertices = simplex(w) # get simplex coordinates with that many dimensions
+					# find the index corresponding to each node's choice for this categorical attribute
+					ndxs = [categorical_ndx[col][S.iloc[i][col]] for i in range(len(S))]
+					Sprime[:,j:j+w] = vertices[ndxs] # use those indices to get the corresponding simplex vertices
+					j+= w
+				else: # easy, just copy in the column
+					Sprime[:,j] = S[col]
+					j += 1
+
+			self.S = Sprime # Overwrite the DataFrame, because I won't need it and don't want to have a self.Sprime
 
 	def run(self) -> Tuple[numpy.ndarray, numpy.ndarray]:
 		"""Run the optimization procedure and return an answer
@@ -181,9 +207,23 @@ class CODA:
 
 		else: # 'distance': # ln(P(A,B,C)) = ln(e^distance((A,B,C) - mu)) = distance((A,B,C) - mu)
 			for k in range(1, self.K+1):
-				community = S.iloc[Z_t == k] # This is where we're assuming Z_t is right.
+				community = S[Z_t == k] # This is where we're assuming Z_t is right. Numpy array here, so no iloc.
 
-				# TODO: find mean and covariance
+				mu = numpy.mean(community, axis=0) # mu[j] = mean of jth attribute
+
+				# Sigma = (sum for i=1..N (x_i - mu)(x_i-mu).T) / N, where .T means "transposed", N is the number
+				# of nodes in the community, mu is as calculated above, and x_i is the value of each node.
+				# numpy.cov(community.T) calculates the numerator / N-1, because it assumes we're doing a *sample
+				# covariance*, where you have to worry about the unbiased estimator:
+				# https://en.wikipedia.org/wiki/Covariance#Calculating_the_sample_covariance
+				# https://www.khanacademy.org/math/ap-statistics/summarizing-quantitative-data-ap/more-standard-deviation/
+				# 	v/another-simulation-giving-evidence-that-n-1-gives-us-an-unbiased-estimate-of-variance
+				# https://www.khanacademy.org/math/ap-statistics/summarizing-quantitative-data-ap/more-standard-deviation/
+				# 	v/review-and-intuition-why-we-divide-by-n-1-for-the-unbiased-sample-variance
+				# Since we're taking covariance of an *entire* population, of everyone in our community, we don't have
+				# to worry about this, and we tell numpy bias=True to get normalization by N instead.
+				Sigma = numpy.cov(community.T, bias=True)
+
 				self.Theta[k] = (mu, Sigma)
 
 
@@ -211,10 +251,19 @@ class CODA:
 
 		return log_p_sum
 
-
 	def __radial_basis_function(self, s_i: pandas.core.series.Series, theta_k: dict):
-		raise NotImplementedError('Coming Soon!') # TODO
-		# I think I'd like to use the simplex method, which means I need some function to convert from categorical
-		# to vertex coordinates
+		"""This is for the distance case, where ln(P(A,B,C)) = ln(e^-distance((A,B,C) - mu)) = -distance((A,B,C) - mu)
+		I'm using a distance function from https://www.cs.otago.ac.nz/staffpriv/mccane/publications/distance_categorical.pdf
+		related to Mahalanobis distance that depends on a community's centroid and covariance. I'm using their Regular
+		Simplex Method.
+
+		:param s_i: data corresponding to a particular node, already transformed to s_i' with simplex vertices in place
+			of categorical variables
+		:theta_k: distribution parameters for the kth cluster
+		:returns: the log probability that data s_i arose from a version of this distribution parameterized by theta_k
+		"""
+		mu, Sigma = theta_k
+		return -(s_i - mu).dot(Sigma).dot(s_i - mu)
+
 
 
