@@ -101,18 +101,28 @@ class CODA:
 		:returns: The indices and energies (relative anomalousness measure) of outliers
 		"""
 		Z_prev = numpy.zeros(len(self.S)) # the point is just to be far from Z_t for first while loop condition check
-		Z_t = numpy.random.choice(numpy.arange(1, self.K+1), size=len(self.S)) # random assignment
+		#Z_t = numpy.random.choice(numpy.arange(1, self.K+1), size=len(self.S)) # random assignment
 		# be careful. One choice is just to run the algorithm multiple times with different initialization here.
 
-		while numpy.mean(Z_t != Z_prev) > 0.01: # Z_t not close enough to Z_prev. Here I'm saying no more than 10% can
-			#have different class. Is there a better cutoff for this iteration?
-			Z_prev = Z_t
+		Z_t = numpy.array([1,1,1,1,1,1,2,2,2,2])
 
+		i = 0
+		while numpy.mean(Z_t != Z_prev) > 0.01: # Z_t not close enough to Z_prev. Here I'm saying no more than 1% can
+			#have different class. Is there a better cutoff for this iteration?
+			Z_prev[:] = Z_t
+			print("i = ", i)
+
+			print("Theta pre M step:", self.Theta)
 			# M_step: choose model parameters for generating distribution(s), assuming assignment
 			self._Q_argmax(Z_t)
+			print("Theta post M step:", self.Theta)
 			
 			# E_step: choose assignment, assuming model parameters
+			print("Z_t pre E step:", Z_t)
 			Z_t, U = self._icm(Z_t)
+			print("Z_t post E step:", Z_t)
+			print("new sum of U:", sum(U))
+			i += 1
 
 		#outlier_ndxs = numpy.where(Z_t == 0)
 		#return outlier_ndxs, U[outlier_ndxs] # indices of outliers + energies
@@ -127,11 +137,11 @@ class CODA:
 		:param Z_t: the current assignment of node clusters
 		:returns: newly optimized assignment of node clusters, corresponding assignment energies
 		"""
-		def _energy_argmin(Z_t: numpy.ndarray, i: int) -> Tuple[int, float]:
+		def _energy_argmin(Z_prev: numpy.ndarray, i: int) -> Tuple[int, float]:
 			"""helper function to find the answer to equation 6 from the paper https://cse.buffalo.edu/~jing/doc/kdd10_coda.pdf,
 			which optimizes a single mode
 
-			:param Z_t: The current assignment of nodes, which _icm is trying to refine
+			:param Z_prev: The current (about to be previous) assignment of nodes, which _icm is trying to refine
 			:param i: the index of the current mode, to be refined at this iteration
 			:returns: the index k of the best cluster to explain the ith node
 			"""
@@ -139,17 +149,21 @@ class CODA:
 			best_U = float('inf')
 
 			# used in calculation of neighbor contribution, unchanging for all k, so calculate once outside the loop
-			W_i = numpy.copy(self.W[i])
+			W_i = numpy.copy(self.W[:,i]) # all connections from some node j to node i
 			W_i[i] = 0 # if there happens to be a self-connection, zero its contribution to this
 
 			for k in range(1, self.K+1): # for k in 1..K, "for all clusters"
 				# Find contribution from the community neighbors. If node i is an outlier, it has no neighbors. Otherwise
-				# its neighbors are the set {j : w_ij > 0, i != j, z_j != 0}
-				neighbors_contribution = 0 if Z_t[i] == 0 else numpy.dot(W_i, k - Z_t == 0) # W_i dot delta(k-Z)
+				# its neighbors are the set {j : w_ij > 0, i != j, z_j != 0}. Here I'm adding normalization by the sum
+				# of weights, which the paper doesn't have. The idea is that a node with more connections is likely to
+				# have lower energy for several communities, and I don't want such nodes looking less anomalous than
+				# ones that don't have as many connections by default.
+				neighbors_contribution = 0 if Z_t[i] == 0 else numpy.dot(W_i, k - Z_t == 0) / sum(W_i) # W_i dot delta(k-Z)
 
 				# Find self contribution, which is the log of the probability the data arose from the generating
 				# distribution of the kth community.
 				self_contribution = self.logP(self.S.iloc[i], self.Theta[k])
+				#print(i, "self_contribution", self_contribution)
 
 				U = -self_contribution - self.lambda_*neighbors_contribution
 
@@ -162,17 +176,21 @@ class CODA:
 		Z_prev = numpy.zeros(Z_t.shape) # the point is just to be far from Z_t for first while loop condition check
 		U = numpy.zeros(len(self.S)) # keep track of all M (= the number of nodes) energy values
 
-		while numpy.mean(Z_t != Z_prev) > 0.01: # Z_t not close enough to Z_prev. Here I'm saying no more than 10% can
+		while numpy.mean(Z_t != Z_prev) > 0.01: # Z_t not close enough to Z_prev. Here I'm saying no more than 1% can
 			#have different class. Is there a better cutoff for this iteration?
 
-			Z_prev = Z_t
+			Z_prev[:] = Z_t
 			for i in range(len(self.S)):
-				Z_t[i], U[i] = _energy_argmin(Z_t, i)
+				Z_t[i], U[i] = _energy_argmin(Z_prev, i) # Z_prev to minimize propagation of single class in one loop
 
 			# Have to order the energies and choose top n or top % as outliers
-			top_n =	numpy.argsort(U)[-self.n_outliers:] if isinstance(self.n_outliers, int) \
-				else numpy.argsort(U)[-self.n_outliers*len(U):]
-			Z_t[top_n] = 0 # set the class of the top_n as 0, which means outlier
+			if self.n_outliers: # Or the user can specify 0 or None to skip outlier assignment
+				top_n =	numpy.argsort(U)[-self.n_outliers:] if isinstance(self.n_outliers, int) \
+					else numpy.argsort(U)[-self.n_outliers*len(U):]
+				Z_t[top_n] = 0 # set the class of the top_n as 0, which means outlier
+
+			print("who:", Z_t)
+			print("whowho:", Z_prev)
 
 		return Z_t, U
 
@@ -260,4 +278,4 @@ class CODA:
 		:returns: the log probability that data s_i arose from a version of this distribution parameterized by theta_k
 		"""
 		mu, Sigma = theta_k
-		return -(s_i - mu).dot(Sigma).dot(s_i - mu)
+		return -(s_i - mu).dot(numpy.linalg.inv(Sigma)).dot(s_i - mu)
