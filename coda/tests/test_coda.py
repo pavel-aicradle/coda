@@ -19,6 +19,13 @@ def test_coda_on_paper_example():
 					 [0, 1, 0, 1, 0, 0, 0, 0, 0, 1], # 9 -> 2, 4, 10
 					 [0, 0, 0, 1, 0, 0, 0, 1, 1, 0]]) # 10 -> 4, 8, 9
 
-	model = CODA(S, W, K=2, lambda_=0.5, n_outliers=1, generating_distribution='independent')
+	model = CODA(S, W, K=2, lambda_=0.5, n_outliers=1, generating_distribution='independent',
+		return_all=True)
+
+	node, energy = model.run()
+
+	print("node: ", node)
+	print("energy: ", energy)
+	print("sum of energy: ", sum(energy))
 
 	print("made it here")

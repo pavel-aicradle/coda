@@ -10,7 +10,7 @@ class CODA:
 	"""
 
 	def __init__(self, S: pandas.DataFrame, W: numpy.ndarray, K: int, lambda_: float, n_outliers: Union[int, float]=10,
-		generating_distribution: str='independent'):
+		generating_distribution: str='independent', return_all=False):
 		"""Constructor
 
 		:param S: A table, with one row per node, including all relevant observable data for that node. Nodes are
@@ -30,6 +30,7 @@ class CODA:
 			center (tricky when you include categorical variables). The joint distribution then becomes e^-distance.
 			For distance I'm using Mahalanobis squared, which measures "the dissimilarity of two random vectors x and y
 			of the same distribution with covariance matrix Sigma".
+		:param return_all: Whether to return only outlier indices and energies or to return all assignments and energies
 		"""
 		# Sanity checking parameters
 		if not (isinstance(n_outliers, float) and n_outliers > 0 and n_outliers < 1) \
@@ -57,17 +58,18 @@ class CODA:
 		# Next, define the proper distribution. That means both the function and the parameters that lock its shape.
 		if generating_distribution=='independent': # ln(P(A,B,C)) = ln(P(A)*P(B)*P(C)) = ln(P(A)) + ln(P(B)) + ln(P(C))
 			self.logP = self.__gaussians_and_multinomials
-			# Theta[k] = parameters for the kth community. kth community params = a dictionary of column name ->
-			# parameters for that attribute. Parameters for a categorical column is a further dictionary of choice -> %.
-			# Parameters for a numerical column are (mu, sigma^2). Values will get populated at first Maximization step.
-			self.Theta = [{col: {} if self.is_categorical[col] else None for col in S} for k in range(K)]
+			# Theta[k] = parameters for the kth community. kth community params = None for 0th community (outliers);
+			# = a dictionary of column name -> parameters for that attribute for all others. Parameters for a
+			# categorical column are a further dictionary of choice -> %. Parameters for a numerical column are
+			# (mu, sigma^2). Values will get populated at first Maximization step.
+			self.Theta = [None] + [{col: {} if self.is_categorical[col] else None for col in S} for k in range(K)]
 		
 		else: # generating_distribution=='distance': ln(P(A,B,C)) = ln(e^distance((A,B,C) - mu)) = distance((A,B,C) - mu)
 			self.logP = self.__radial_basis_function
 
 			# Theta[k] in this case is (mu, Sigma), where mu is a vector and Sigma is a covariance matrix. Values will
 			# get populated at first Maximization step.
-			self.Theta = [None for k in range(K)]
+			self.Theta = [None for k in range(K+1)]
 			
 			# All categorical inputs need to be transformed to simplex vertex coordinates. Instead of doing this
 			# dynamically every time I need to take a distance, it's probably better to just sacrifice the extra memory
@@ -102,7 +104,7 @@ class CODA:
 		Z_t = numpy.random.choice(numpy.arange(1, self.K+1), size=len(self.S)) # random assignment
 		# be careful. One choice is just to run the algorithm multiple times with different initialization here.
 
-		while numpy.mean(Z_t != Z_prev) > 0.1: # Z_t not close enough to Z_prev. Here I'm saying no more than 10% can
+		while numpy.mean(Z_t != Z_prev) > 0.01: # Z_t not close enough to Z_prev. Here I'm saying no more than 10% can
 			#have different class. Is there a better cutoff for this iteration?
 			Z_prev = Z_t
 
@@ -112,8 +114,9 @@ class CODA:
 			# E_step: choose assignment, assuming model parameters
 			Z_t, U = self._icm(Z_t)
 
-		outlier_ndxs = numpy.where(Z_t == 0)
-		return outlier_ndxs, U[outlier_ndxs] # indices of outliers + energies
+		#outlier_ndxs = numpy.where(Z_t == 0)
+		#return outlier_ndxs, U[outlier_ndxs] # indices of outliers + energies
+		return Z_t, U # return all for testing
 
 	def _icm(self, Z_t: numpy.ndarray) -> Tuple[numpy.ndarray, numpy.ndarray]:
 		"""'Iterated Conditional Modes is a deterministic algorithm for obtaining a configuration of a local maximum of
@@ -124,7 +127,7 @@ class CODA:
 		:param Z_t: the current assignment of node clusters
 		:returns: newly optimized assignment of node clusters, corresponding assignment energies
 		"""
-		def _energy_argmin(self, Z_t: numpy.ndarray, i: int) -> Tuple[int, float]:
+		def _energy_argmin(Z_t: numpy.ndarray, i: int) -> Tuple[int, float]:
 			"""helper function to find the answer to equation 6 from the paper https://cse.buffalo.edu/~jing/doc/kdd10_coda.pdf,
 			which optimizes a single mode
 
@@ -157,13 +160,13 @@ class CODA:
 			return best_k, best_U
 
 		Z_prev = numpy.zeros(Z_t.shape) # the point is just to be far from Z_t for first while loop condition check
-		U = numpy.zeros(len(S)) # keep track of all M (= the number of nodes) energy values
+		U = numpy.zeros(len(self.S)) # keep track of all M (= the number of nodes) energy values
 
-		while numpy.mean(Z_t != Z_prev) > 0.1: # Z_t not close enough to Z_prev. Here I'm saying no more than 10% can
+		while numpy.mean(Z_t != Z_prev) > 0.01: # Z_t not close enough to Z_prev. Here I'm saying no more than 10% can
 			#have different class. Is there a better cutoff for this iteration?
 
 			Z_prev = Z_t
-			for i in range(len(S)):
+			for i in range(len(self.S)):
 				Z_t[i], U[i] = _energy_argmin(Z_t, i)
 
 			# Have to order the energies and choose top n or top % as outliers
@@ -191,7 +194,7 @@ class CODA:
 
 			for k in range(1, self.K+1): # for k in 1..K, "for each cluster"
 				# Inside here we're really only going to be operating over nodes with class k
-				community = S.iloc[Z_t == k] # dataframe only of nodes belonging to the kth cluster. Makes a copy.
+				community = self.S.iloc[Z_t == k] # dataframe only of nodes belonging to the kth cluster. Makes a copy.
 
 				for col,meow in self.is_categorical.iteritems():
 					if meow: # If the attribute in this column is a cat (categorical), then we're dealing with a multinomial.
@@ -202,7 +205,7 @@ class CODA:
 
 		else: # 'distance': # ln(P(A,B,C)) = ln(e^distance((A,B,C) - mu)) = distance((A,B,C) - mu)
 			for k in range(1, self.K+1):
-				community = S[Z_t == k] # This is where we're assuming Z_t is right. Numpy array here, so no iloc.
+				community = self.S[Z_t == k] # This is where we're assuming Z_t is right. Numpy array here, so no iloc.
 
 				mu = numpy.mean(community, axis=0) # mu[j] = mean of jth attribute
 
