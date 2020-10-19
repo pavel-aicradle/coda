@@ -1,4 +1,3 @@
-
 import numpy
 import pandas
 from typing import Union, Tuple
@@ -52,8 +51,8 @@ class CODA:
 		# each one have a specific index
 		self.is_categorical = (S.dtypes == 'category') | (S.dtypes == 'O') # pandas Series
 		self.categorical_ndx = {}
-		for col,meow in is_categorical.iteritems():
-			if meow: categorical_ndx[col] = {x:i for i,x in enumerate(S[col].unique())} # map unique values -> indices
+		for col,meow in self.is_categorical.iteritems():
+			if meow: self.categorical_ndx[col] = {x:i for i,x in enumerate(S[col].unique())} # map unique values -> indices
 
 		# Next, define the proper distribution. That means both the function and the parameters that lock its shape.
 		if generating_distribution=='independent': # ln(P(A,B,C)) = ln(P(A)*P(B)*P(C)) = ln(P(A)) + ln(P(B)) + ln(P(C))
@@ -61,7 +60,7 @@ class CODA:
 			# Theta[k] = parameters for the kth community. kth community params = a dictionary of column name ->
 			# parameters for that attribute. Parameters for a categorical column is a further dictionary of choice -> %.
 			# Parameters for a numerical column are (mu, sigma^2). Values will get populated at first Maximization step.
-			self.Theta = [{col: {} if is_categorical[col] else None for col in S} for k in range(K)]
+			self.Theta = [{col: {} if self.is_categorical[col] else None for col in S} for k in range(K)]
 		
 		else: # generating_distribution=='distance': ln(P(A,B,C)) = ln(e^distance((A,B,C) - mu)) = distance((A,B,C) - mu)
 			self.logP = self.__radial_basis_function
@@ -71,21 +70,21 @@ class CODA:
 			self.Theta = [None for k in range(K)]
 			
 			# All categorical inputs need to be transformed to simplex vertex coordinates. Instead of doing this
-			# numerous times dynamically below, every time I need to take a distance, it's probably better to just
-			# sacrifice the extra memory and do the transformation once. Memory is cheap.
+			# dynamically every time I need to take a distance, it's probably better to just sacrifice the extra memory
+			# and do the transformation once. Memory is cheap.
 			# Because S' is completely numerical, I can do away with the DataFrame and let attributes be stored in a
 			# numpy array. The width needed for each new attribute vector is 1 for each standard not-categorical
 			# attribute and |choices|-1 for each categorical attribute.
-			width = sum([len(categorical_ndx[col])-1 if meow else 1 for col,meow in is_categorical.iteritems()])
+			width = sum([len(self.categorical_ndx[col])-1 if meow else 1 for col,meow in self.is_categorical.iteritems()])
 			Sprime = numpy.zeros((len(S), width))
 
 			j = 0 # keep track of which column we're filling in S'
-			for col,meow in is_categorical.iteritems(): # fill S'
+			for col,meow in self.is_categorical.iteritems(): # fill S'
 				if meow: # categorical case -> have to transform to simplex vertices
 					w = len(categorical_ndx[col])-1 # the number of columns required to represent this variable
 					vertices = simplex(w) # get simplex coordinates with that many dimensions
 					# find the index corresponding to each node's choice for this categorical attribute
-					ndxs = [categorical_ndx[col][S.iloc[i][col]] for i in range(len(S))]
+					ndxs = [self.categorical_ndx[col][S.iloc[i][col]] for i in range(len(S))]
 					Sprime[:,j:j+w] = vertices[ndxs] # use those indices to get the corresponding simplex vertices
 					j+= w
 				else: # easy, just copy in the column
@@ -99,7 +98,6 @@ class CODA:
 		
 		:returns: The indices and energies (relative anomalousness measure) of outliers
 		"""
-
 		Z_prev = numpy.zeros(len(self.S)) # the point is just to be far from Z_t for first while loop condition check
 		Z_t = numpy.random.choice(numpy.arange(1, self.K+1), size=len(self.S)) # random assignment
 		# be careful. One choice is just to run the algorithm multiple times with different initialization here.
@@ -117,7 +115,6 @@ class CODA:
 		outlier_ndxs = numpy.where(Z_t == 0)
 		return outlier_ndxs, U[outlier_ndxs] # indices of outliers + energies
 
-
 	def _icm(self, Z_t: numpy.ndarray) -> Tuple[numpy.ndarray, numpy.ndarray]:
 		"""'Iterated Conditional Modes is a deterministic algorithm for obtaining a configuration of a local maximum of
 		the joint probability of a Markov random field. It does this by iteratively maximizing the probability of each
@@ -127,7 +124,6 @@ class CODA:
 		:param Z_t: the current assignment of node clusters
 		:returns: newly optimized assignment of node clusters, corresponding assignment energies
 		"""
-
 		def _energy_argmin(self, Z_t: numpy.ndarray, i: int) -> Tuple[int, float]:
 			"""helper function to find the answer to equation 6 from the paper https://cse.buffalo.edu/~jing/doc/kdd10_coda.pdf,
 			which optimizes a single mode
@@ -159,7 +155,6 @@ class CODA:
 					best_k = k
 			
 			return best_k, best_U
-
 
 		Z_prev = numpy.zeros(Z_t.shape) # the point is just to be far from Z_t for first while loop condition check
 		U = numpy.zeros(len(S)) # keep track of all M (= the number of nodes) energy values
@@ -200,7 +195,7 @@ class CODA:
 
 				for col,meow in self.is_categorical.iteritems():
 					if meow: # If the attribute in this column is a cat (categorical), then we're dealing with a multinomial.
-						for choice in categorical_ndx[col]:
+						for choice in self.categorical_ndx[col]:
 							self.Theta[k][col][choice] = sum(community[col] == choice)/len(community)
 					else: # then we're modeling this attribute with a Gaussian
 						self.Theta[k][col] = (community[col].mean(), community[col].var())
@@ -226,10 +221,9 @@ class CODA:
 
 				self.Theta[k] = (mu, Sigma)
 
-
 	### generator distributions ###
 
-	def __gaussians_and_multinomials(self, s_i: pandas.core.series.Series, theta_k: dict):
+	def __gaussians_and_multinomials(self, s_i: pandas.core.series.Series, theta_k: dict) -> float:
 		"""This is for the independent case, where ln(P(A,B,C)) = ln(P(A)*P(B)*P(C)) = ln(P(A)) + ln(P(B)) + ln(P(C))
 		Here in the numerical case: ln P(A=a | z=k, Theta) = ln univariate_gaussian(A, theta_k) = a one-line equation
 		And in the categorical case: ln P(B=b | z=k, Theta) = ln P(B=b | theta_k) = ln theta_k[b] =
@@ -251,7 +245,7 @@ class CODA:
 
 		return log_p_sum
 
-	def __radial_basis_function(self, s_i: pandas.core.series.Series, theta_k: dict):
+	def __radial_basis_function(self, s_i: pandas.core.series.Series, theta_k: dict) -> float:
 		"""This is for the distance case, where ln(P(A,B,C)) = ln(e^-distance((A,B,C) - mu)) = -distance((A,B,C) - mu)
 		I'm using a distance function from https://www.cs.otago.ac.nz/staffpriv/mccane/publications/distance_categorical.pdf
 		related to Mahalanobis distance that depends on a community's centroid and covariance. I'm using their Regular
@@ -264,6 +258,3 @@ class CODA:
 		"""
 		mu, Sigma = theta_k
 		return -(s_i - mu).dot(Sigma).dot(s_i - mu)
-
-
-

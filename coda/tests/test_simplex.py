@@ -1,10 +1,9 @@
-# run with python3 -m pytest
+# run with python3 -m pytest -s
 
 import pytest
 import time
 import numpy
 from ..coda import simplex
-
 
 def test_simplexes_are_regular():
 	for i in range(2,6):

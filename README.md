@@ -1,5 +1,6 @@
 # CODA
 TODO: Continuous integration status button
+[![Coverage Status](https://coveralls.io/repos/github/pavel-aicradle/coda/badge.svg?branch=master)](https://coveralls.io/github/pavel-aicradle/coda?branch=master)
 
 TODO: Sphinx Documentation, [How it works](https://safexai.atlassian.net/wiki/spaces/PROG/pages/1582399552/Community+Outlier+Detection+Algorithm+Notes+and+Proofs) (private TODO: make public?)
 
