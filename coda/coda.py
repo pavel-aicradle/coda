@@ -262,6 +262,8 @@ class CODA:
 			else: # then we're modeling this attribute with a Gaussian
 				# The paramerters of a Gaussian are (mu, sigma^2)
 				mu, sigma2 = theta_k[col]
+				# The second term basically asks "how many standard deviations away from the mean is this?", and the
+				# first term keeps the algorithm from cheating via just making sigma large by penalizing large sigma.
 				log_p_sum += -numpy.log(numpy.sqrt(2*numpy.pi*sigma2)) - (s_i[col] - mu)**2/(2*sigma2)
 
 		return log_p_sum
@@ -278,4 +280,8 @@ class CODA:
 		:returns: the log probability that data s_i arose from a version of this distribution parameterized by theta_k
 		"""
 		mu, Sigma = theta_k
-		return -(s_i - mu).dot(numpy.linalg.inv(Sigma)).dot(s_i - mu)
+		# In order for e^distance to be a proper probability distribution, it has to be normalized, same as the
+		# multivariate Gaussian. Which means when we take the log, we get the determinant of Sigma in a separate term.
+		# Much like the univariate case, this keeps the algorithm from cheating by penalizing large Sigma.
+		return -numpy.log(numpy.sqrt(2*numpy.pi*numpy.linalg.det(Sigma))) - \
+			0.5*(s_i - mu).dot(numpy.linalg.inv(Sigma)).dot(s_i - mu)
