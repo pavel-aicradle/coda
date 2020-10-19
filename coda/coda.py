@@ -1,7 +1,7 @@
-
 import numpy
 import pandas
 from typing import Union, Tuple
+from .simplex import simplex
 
 class CODA:
 	"""Performs outlier detection on a graph with respect to fellow community members. That is, clusters and finds
@@ -10,7 +10,7 @@ class CODA:
 	"""
 
 	def __init__(self, S: pandas.DataFrame, W: numpy.ndarray, K: int, lambda_: float, n_outliers: Union[int, float]=10,
-		generating_distribution: str='independent'):
+		generating_distribution: str='independent', return_all=False):
 		"""Constructor
 
 		:param S: A table, with one row per node, including all relevant observable data for that node. Nodes are
@@ -30,6 +30,7 @@ class CODA:
 			center (tricky when you include categorical variables). The joint distribution then becomes e^-distance.
 			For distance I'm using Mahalanobis squared, which measures "the dissimilarity of two random vectors x and y
 			of the same distribution with covariance matrix Sigma".
+		:param return_all: Whether to return only outlier indices and energies or to return all assignments and energies
 		"""
 		# Sanity checking parameters
 		if not (isinstance(n_outliers, float) and n_outliers > 0 and n_outliers < 1) \
@@ -51,33 +52,59 @@ class CODA:
 		# each one have a specific index
 		self.is_categorical = (S.dtypes == 'category') | (S.dtypes == 'O') # pandas Series
 		self.categorical_ndx = {}
-		for col, v in is_categorical.iteritems():
-			if v: categorical_ndx[col] = dict({x:i for i,x in enumerate(S[col].unique())}) # map unique values -> indices
+		for col,meow in self.is_categorical.iteritems():
+			if meow: self.categorical_ndx[col] = {x:i for i,x in enumerate(S[col].unique())} # map unique values -> indices
 
 		# Next, define the proper distribution. That means both the function and the parameters that lock its shape.
 		if generating_distribution=='independent': # ln(P(A,B,C)) = ln(P(A)*P(B)*P(C)) = ln(P(A)) + ln(P(B)) + ln(P(C))
 			self.logP = self.__gaussians_and_multinomials
-			# Theta[k] = parameters for the kth community. kth community params = a dictionary of column name ->
-			# parameters for that attribute. Parameters for a categorical column is a further dictionary of choice -> %.
-			# Parameters for a numerical column are (mu, sigma^2)
-			self.Theta = {col: {} if is_categorical[col] else None for col in S} # will get filled at first Maximization step
-		else: # ln(P(A,B,C)) = ln(e^distance((A,B,C) - mu)) = distance((A,B,C) - mu)
+			# Theta[k] = parameters for the kth community. kth community params = None for 0th community (outliers);
+			# = a dictionary of column name -> parameters for that attribute for all others. Parameters for a
+			# categorical column are a further dictionary of choice -> %. Parameters for a numerical column are
+			# (mu, sigma^2). Values will get populated at first Maximization step.
+			self.Theta = [None] + [{col: {} if self.is_categorical[col] else None for col in S} for k in range(K)]
+		
+		else: # generating_distribution=='distance': ln(P(A,B,C)) = ln(e^distance((A,B,C) - mu)) = distance((A,B,C) - mu)
 			self.logP = self.__radial_basis_function
 
-			self.Theta = None # not sure yet
+			# Theta[k] in this case is (mu, Sigma), where mu is a vector and Sigma is a covariance matrix. Values will
+			# get populated at first Maximization step.
+			self.Theta = [None for k in range(K+1)]
 			
+			# All categorical inputs need to be transformed to simplex vertex coordinates. Instead of doing this
+			# dynamically every time I need to take a distance, it's probably better to just sacrifice the extra memory
+			# and do the transformation once. Memory is cheap.
+			# Because S' is completely numerical, I can do away with the DataFrame and let attributes be stored in a
+			# numpy array. The width needed for each new attribute vector is 1 for each standard not-categorical
+			# attribute and |choices|-1 for each categorical attribute.
+			width = sum([len(self.categorical_ndx[col])-1 if meow else 1 for col,meow in self.is_categorical.iteritems()])
+			Sprime = numpy.zeros((len(S), width))
+
+			j = 0 # keep track of which column we're filling in S'
+			for col,meow in self.is_categorical.iteritems(): # fill S'
+				if meow: # categorical case -> have to transform to simplex vertices
+					w = len(categorical_ndx[col])-1 # the number of columns required to represent this variable
+					vertices = simplex(w) # get simplex coordinates with that many dimensions
+					# find the index corresponding to each node's choice for this categorical attribute
+					ndxs = [self.categorical_ndx[col][S.iloc[i][col]] for i in range(len(S))]
+					Sprime[:,j:j+w] = vertices[ndxs] # use those indices to get the corresponding simplex vertices
+					j+= w
+				else: # easy, just copy in the column
+					Sprime[:,j] = S[col]
+					j += 1
+
+			self.S = Sprime # Overwrite the DataFrame, because I won't need it and don't want to have a self.Sprime
 
 	def run(self) -> Tuple[numpy.ndarray, numpy.ndarray]:
 		"""Run the optimization procedure and return an answer
 		
 		:returns: The indices and energies (relative anomalousness measure) of outliers
 		"""
-
 		Z_prev = numpy.zeros(len(self.S)) # the point is just to be far from Z_t for first while loop condition check
 		Z_t = numpy.random.choice(numpy.arange(1, self.K+1), size=len(self.S)) # random assignment
 		# be careful. One choice is just to run the algorithm multiple times with different initialization here.
 
-		while numpy.mean(Z_t != Z_prev) > 0.1: # Z_t not close enough to Z_prev. Here I'm saying no more than 10% can
+		while numpy.mean(Z_t != Z_prev) > 0.01: # Z_t not close enough to Z_prev. Here I'm saying no more than 10% can
 			#have different class. Is there a better cutoff for this iteration?
 			Z_prev = Z_t
 
@@ -87,9 +114,9 @@ class CODA:
 			# E_step: choose assignment, assuming model parameters
 			Z_t, U = self._icm(Z_t)
 
-		outlier_ndxs = numpy.where(Z_t == 0)
-		return outlier_ndxs, U[outlier_ndxs] # indices of outliers + energies
-
+		#outlier_ndxs = numpy.where(Z_t == 0)
+		#return outlier_ndxs, U[outlier_ndxs] # indices of outliers + energies
+		return Z_t, U # return all for testing
 
 	def _icm(self, Z_t: numpy.ndarray) -> Tuple[numpy.ndarray, numpy.ndarray]:
 		"""'Iterated Conditional Modes is a deterministic algorithm for obtaining a configuration of a local maximum of
@@ -100,8 +127,7 @@ class CODA:
 		:param Z_t: the current assignment of node clusters
 		:returns: newly optimized assignment of node clusters, corresponding assignment energies
 		"""
-
-		def _energy_argmin(self, Z_t: numpy.ndarray, i: int) -> Tuple[int, float]:
+		def _energy_argmin(Z_t: numpy.ndarray, i: int) -> Tuple[int, float]:
 			"""helper function to find the answer to equation 6 from the paper https://cse.buffalo.edu/~jing/doc/kdd10_coda.pdf,
 			which optimizes a single mode
 
@@ -133,16 +159,15 @@ class CODA:
 			
 			return best_k, best_U
 
-
 		Z_prev = numpy.zeros(Z_t.shape) # the point is just to be far from Z_t for first while loop condition check
-		U = numpy.zeros(len(S)) # keep track of all M (= the number of nodes) energy values
+		U = numpy.zeros(len(self.S)) # keep track of all M (= the number of nodes) energy values
 
-		while numpy.mean(Z_t != Z_prev) > 0.1 # Z_t not close enough to Z_prev. Here I'm saying no more than 10% can
+		while numpy.mean(Z_t != Z_prev) > 0.01: # Z_t not close enough to Z_prev. Here I'm saying no more than 10% can
 			#have different class. Is there a better cutoff for this iteration?
 
 			Z_prev = Z_t
-			for i in range(len(S)):
-				Z_t[i], U[i] = self._energy_argmin(Z_t, i)
+			for i in range(len(self.S)):
+				Z_t[i], U[i] = _energy_argmin(Z_t, i)
 
 			# Have to order the energies and choose top n or top % as outliers
 			top_n =	numpy.argsort(U)[-self.n_outliers:] if isinstance(self.n_outliers, int) \
@@ -169,26 +194,39 @@ class CODA:
 
 			for k in range(1, self.K+1): # for k in 1..K, "for each cluster"
 				# Inside here we're really only going to be operating over nodes with class k
-				community = S.iloc[Z_t == k] # dataframe only of nodes belonging to the kth cluster. Makes a copy.
+				community = self.S.iloc[Z_t == k] # dataframe only of nodes belonging to the kth cluster. Makes a copy.
 
 				for col,meow in self.is_categorical.iteritems():
 					if meow: # If the attribute in this column is a cat (categorical), then we're dealing with a multinomial.
-						for choice in categorical_ndx[col]:
+						for choice in self.categorical_ndx[col]:
 							self.Theta[k][col][choice] = sum(community[col] == choice)/len(community)
 					else: # then we're modeling this attribute with a Gaussian
 						self.Theta[k][col] = (community[col].mean(), community[col].var())
 
 		else: # 'distance': # ln(P(A,B,C)) = ln(e^distance((A,B,C) - mu)) = distance((A,B,C) - mu)
 			for k in range(1, self.K+1):
-				community = S.iloc[Z_t == k]
+				community = self.S[Z_t == k] # This is where we're assuming Z_t is right. Numpy array here, so no iloc.
 
-				# TODO: find mean and covariance
+				mu = numpy.mean(community, axis=0) # mu[j] = mean of jth attribute
+
+				# Sigma = (sum for i=1..N (x_i - mu)(x_i-mu).T) / N, where .T means "transposed", N is the number
+				# of nodes in the community, mu is as calculated above, and x_i is the value of each node.
+				# numpy.cov(community.T) calculates the numerator / N-1, because it assumes we're doing a *sample
+				# covariance*, where you have to worry about the unbiased estimator:
+				# https://en.wikipedia.org/wiki/Covariance#Calculating_the_sample_covariance
+				# https://www.khanacademy.org/math/ap-statistics/summarizing-quantitative-data-ap/more-standard-deviation/
+				# 	v/another-simulation-giving-evidence-that-n-1-gives-us-an-unbiased-estimate-of-variance
+				# https://www.khanacademy.org/math/ap-statistics/summarizing-quantitative-data-ap/more-standard-deviation/
+				# 	v/review-and-intuition-why-we-divide-by-n-1-for-the-unbiased-sample-variance
+				# Since we're taking covariance of an *entire* population, of everyone in our community, we don't have
+				# to worry about this, and we tell numpy bias=True to get normalization by N instead.
+				Sigma = numpy.cov(community.T, bias=True)
+
 				self.Theta[k] = (mu, Sigma)
-
 
 	### generator distributions ###
 
-	def __gaussians_and_multinomials(self, s_i: pandas.core.series.Series, theta_k: dict):
+	def __gaussians_and_multinomials(self, s_i: pandas.core.series.Series, theta_k: dict) -> float:
 		"""This is for the independent case, where ln(P(A,B,C)) = ln(P(A)*P(B)*P(C)) = ln(P(A)) + ln(P(B)) + ln(P(C))
 		Here in the numerical case: ln P(A=a | z=k, Theta) = ln univariate_gaussian(A, theta_k) = a one-line equation
 		And in the categorical case: ln P(B=b | z=k, Theta) = ln P(B=b | theta_k) = ln theta_k[b] =
@@ -196,6 +234,7 @@ class CODA:
 
 		:param s_i: data corresponding to a particular node
 		:theta_k: distribution parameters for the kth cluster
+		:returns: the log probability that data s_i arose from a version of this distribution parameterized by theta_k
 		"""
 		log_p_sum = 0
 		for col,meow in self.is_categorical.iteritems():
@@ -209,9 +248,16 @@ class CODA:
 
 		return log_p_sum
 
+	def __radial_basis_function(self, s_i: pandas.core.series.Series, theta_k: dict) -> float:
+		"""This is for the distance case, where ln(P(A,B,C)) = ln(e^-distance((A,B,C) - mu)) = -distance((A,B,C) - mu)
+		I'm using a distance function from https://www.cs.otago.ac.nz/staffpriv/mccane/publications/distance_categorical.pdf
+		related to Mahalanobis distance that depends on a community's centroid and covariance. I'm using their Regular
+		Simplex Method.
 
-	def __radial_basis_function(self, s_i: pandas.core.series.Series, theta_k: dict):
-		raise NotImplementedError('Coming Soon!') # TODO
-		# I think I'd like to use the simplex method, which means I need some function to convert from categorical
-		# to vertex coordinates
-
+		:param s_i: data corresponding to a particular node, already transformed to s_i' with simplex vertices in place
+			of categorical variables
+		:theta_k: distribution parameters for the kth cluster
+		:returns: the log probability that data s_i arose from a version of this distribution parameterized by theta_k
+		"""
+		mu, Sigma = theta_k
+		return -(s_i - mu).dot(Sigma).dot(s_i - mu)
