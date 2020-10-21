@@ -10,7 +10,7 @@ class CODA:
 	"""
 
 	def __init__(self, S: pandas.DataFrame, W: numpy.ndarray, K: int, lambda_: float, n_outliers: Union[int, float]=10,
-		generating_distribution: str='independent', return_all=False):
+		generating_distribution: str='independent', return_all=False, n_runs=1, verbose: bool=False):
 		"""Constructor
 
 		:param S: A table, with one row per node, including all relevant observable data for that node. Nodes are
@@ -31,6 +31,8 @@ class CODA:
 			For distance I'm using Mahalanobis squared, which measures "the dissimilarity of two random vectors x and y
 			of the same distribution with covariance matrix Sigma".
 		:param return_all: Whether to return only outlier indices and energies or to return all assignments and energies
+		:param n_runs: The algorithm will perform this many random starts and choose the best final state.
+		:param verbose: Whether to show printouts from the Expectation Maximization optimization procedure.
 		"""
 		# Sanity checking parameters
 		if not (isinstance(n_outliers, float) and n_outliers > 0 and n_outliers < 1) \
@@ -83,96 +85,96 @@ class CODA:
 			j = 0 # keep track of which column we're filling in S'
 			for col,meow in self.is_categorical.iteritems(): # fill S'
 				if meow: # categorical case -> have to transform to simplex vertices
-					# get simplex coordinates to represent the right number of choices
+					# Get simplex coordinates to represent the right number of choices
 					vertices = simplex(len(self.categorical_ndx[col]))
-					# find the index corresponding to each node's choice for this categorical attribute
+					# Find the index corresponding to each node's choice for this categorical attribute
 					ndxs = [self.categorical_ndx[col][S.iloc[i][col]] for i in range(len(S))]
-					Sprime[:,j:j+vertices.shape[1]] = vertices[ndxs] # use those indices to get the corresponding simplex vertices
+					# Use those indices to get the corresponding simplex vertices. Add noise to avoid singular covariance matrices
+					Sprime[:,j:j+vertices.shape[1]] = vertices[ndxs] + numpy.random.normal(size=(len(ndxs), vertices.shape[1]))*0.01
 					j+= vertices.shape[1]
 				else: # easy, just copy in the column
 					Sprime[:,j] = S[col]
 					j += 1
 
 			self.S = Sprime # Overwrite the DataFrame, because I won't need it and don't want to have a self.Sprime
-			print(Sprime)
+
 
 	def run(self) -> Tuple[numpy.ndarray, numpy.ndarray]:
-		"""Run the optimization procedure and return an answer
+		"""Run the optimization procedure several times--each time preclustering without anomalies, then clustering with
+		anomalies--, and return an answer.
 		
 		:returns: The indices and energies (relative anomalousness measure) of outliers
 		"""
-		Z_prev = numpy.zeros(len(self.S)) # the point is just to be far from Z_t for first while loop condition check
-		Z_t = numpy.arange(1, self.K+1)[numpy.arange(len(self.S)) % self.K]
-		numpy.random.shuffle(Z_t) # random assignment, approximately evenly split between all clusters
-		# Run multiple times to find lowest energy?
+		best_U = [float('inf')]
 
-		#Z_t = numpy.array([1,1,1,1,1,1,2,2,2,2,2])
+		for i in range(self.n_runs):
+			# find initial clusters if no outliers considered
+			if self.verbose: print('run',i,'==preclustering==')
+			Z_0, U_0 = self._expectation_maximization(0)
+			# find final communities and outliers using initial clusters as EM starting point
+			if self.verbose: print('run',i,'==clustering with outliers==')
+			Z_t, U = self._expectation_maximization(self.n_outliers, Z_0)
 
-		i = 0
-		while numpy.mean(Z_t != Z_prev) > 0.01: # Z_t not close enough to Z_prev. Here I'm saying no more than 1% can
-			#have different class. Is there a better cutoff for this iteration?
-			Z_prev[:] = Z_t
-			print("i = ", i)
+			if sum(U) < sum(best_U):
+				best_U = U
+				best_Z_t = Z_t
 
-			print("Theta pre M step:", self.Theta)
-			# M_step: choose model parameters for generating distribution(s), assuming assignment
-			print(Z_t)
-			self._Q_argmax(Z_t)
-			print("Theta post M step:", self.Theta)
-			
-			# E_step: choose assignment, assuming model parameters
-			print("Z_t pre E step:", Z_t)
-			Z_t, U = self._icm(Z_t, n_outliers=None)
-			print("Z_t post E step:", Z_t)
-			print("new sum of U:", sum(U))
-			i += 1
+		return best_Z_t, best_U if self.return_all else (numpy.where(Z_t == 0), U[numpy.where(Z_t == 0)])
 
-			# It's possible to drive one of the clusters extinct. This is bad. Start over.
-			if len(numpy.unique(Z_t)) < self.K:
-				print("OHH NO!")
-				i = 0
-				Z_prev = numpy.zeros(len(self.S))
+
+	def _expectation_maximization(self, n_outliers: int, Z_t: numpy.ndarray=None):
+		"""This function performs the EM optimization procedure. It tries up to 100 times to run without a cluster
+		getting swallowed by others. If that limit is reached, the user likely specified too many, so tell them so.
+
+		:param n_outliers: How many outliers to assign during clustering. In run() I start off using zero so that this
+			converges to plain clusters, and then I use the answer to initialize a second process where I am assigning
+			outliers.
+		:param Z_t: An initial setting for Z_t. Z_t is initialized as random if not given.
+		"""
+		for i in range(100): # Try 100 times to get a run where clusters don't completely devour each other
+			if self.verbose:
+				print('EM run', i)
+				j = 0
+
+			Z_prev = numpy.zeros(len(self.S)) # the point is just to be far from Z_t for first while loop condition check
+			if Z_t is None: # then give it a random assignment, approximately evenly split between all clusters
 				Z_t = numpy.arange(1, self.K+1)[numpy.arange(len(self.S)) % self.K]
-				numpy.random.shuffle(Z_t)
+				numpy.random.shuffle(Z_t) # This is where all the randomness comes from. Everything else is deterministic.
 
+			while numpy.mean(Z_t != Z_prev) > 0.01: # Z_t not close enough to Z_prev. Here I'm saying no more than 1% can
+				#have different class. Is there a better cutoff for this iteration?
+				Z_prev[:] = Z_t
 
-		print("half way")
+				if self.verbose:
+					print('optimization step', j)
+					print('Theta pre M step:', self.Theta)
 
-		i = 0
-		Z_prev = numpy.zeros(len(self.S))
-		
-		while numpy.mean(Z_t != Z_prev) > 0.01: # Z_t not close enough to Z_prev. Here I'm saying no more than 1% can
-			#have different class. Is there a better cutoff for this iteration?
-			Z_prev[:] = Z_t
-			print("i = ", i)
+				# M_step: choose model parameters for generating distribution(s), assuming assignment
+				self._Q_argmax(Z_t)
 
-			print("Theta pre M step:", self.Theta)
-			# M_step: choose model parameters for generating distribution(s), assuming assignment
-			print(Z_t)
-			self._Q_argmax(Z_t)
-			print("Theta post M step:", self.Theta)
+				if self.verbose:
+					print('Theta post M step:', self.Theta)
+					print('Z_t pre E step:', Z_t)
+
+				# E_step: choose assignment, assuming model parameters
+				Z_t, U = self._icm(Z_t, n_outliers=n_outliers)
+
+				if self.verbose:
+					print('Z_t post E step:', Z_t)
+					print('new sum of U:', sum(U))
+					j += 1
+
+				# It's possible to drive one of the clusters extinct. This is bad. Start over. This usually only happens
+				# when starting from random assignments, very rarely when starting from pre-clusters.
+				if len(numpy.unique(Z_t)) < self.K + bool(n_outliers):
+					Z_t = None # Z_t only gets reset if it's None
+					break # out of the inner loop: try the procedure from a different starting point
 			
-			# E_step: choose assignment, assuming model parameters
-			print("Z_t pre E step:", Z_t)
-			Z_t, U = self._icm(Z_t, n_outliers=self.n_outliers)
-			print("Z_t post E step:", Z_t)
-			print("new sum of U:", sum(U))
-			i += 1
+			else: return Z_t, U # has to be in else otherwise the break causes the function to return
 
-			# It's possible to drive one of the clusters extinct. This is bad. Start over.
-			if len(numpy.unique(Z_t)) < self.K+1:
-				print("OHH NO 2!")
-				i = 0
-				Z_prev = numpy.zeros(len(self.S))
-				Z_t = numpy.arange(1, self.K+1)[numpy.arange(len(self.S)) % self.K]
-				numpy.random.shuffle(Z_t)
+		raise StopIteration("Expectation Maximization is failing to find a starting point that doesn't result in " +
+				"communities swallowing each other. Try decreasing K.")
 
-
-		if self.return_all:
-			return Z_t, U # return all for testing
-		else:
-			outlier_ndxs = numpy.where(Z_t == 0)
-			return outlier_ndxs, U[outlier_ndxs] # indices of outliers + energies
 
 	def _icm(self, Z_t: numpy.ndarray, n_outliers: int) -> Tuple[numpy.ndarray, numpy.ndarray]:
 		"""'Iterated Conditional Modes is a deterministic algorithm for obtaining a configuration of a local maximum of
@@ -192,7 +194,6 @@ class CODA:
 			:param i: the index of the current mode, to be refined at this iteration
 			:returns: the index k of the best cluster to explain the ith node
 			"""
-			best_k = None
 			best_U = float('inf')
 
 			# used in calculation of neighbor contribution, unchanging for all k, so calculate once outside the loop
@@ -203,17 +204,18 @@ class CODA:
 				# Find contribution from the community neighbors. If node i is an outlier, it has no neighbors. Otherwise
 				# its neighbors are the set {j : w_ij > 0, i != j, z_j != 0}. Here I'm adding normalization by the sum
 				# of weights, which the paper doesn't have. The idea is that a node with more connections is likely to
-				# have lower energy for several communities, and I don't want such nodes looking less anomalous than
-				# ones that don't have as many connections by default.
+				# have lower energy for several communities, and I don't want such nodes by default looking less
+				# anomalous than ones that don't have as many connections.
 				neighbors_contribution = 0 if Z_t[i] == 0 else numpy.dot(W_i, k - Z_t == 0) / sum(W_i) # W_i dot delta(k-Z)
 				# NOTE: I removed the 0 if Z_t[i] == 0 else condition on the line above, because it led outlier nodes
-				# to hopelessly remain outliers too much.
+				# to hopelessly remain outliers too much. This makes the Random Field asymmetrical. UPDATE: Removing
+				# that condition can cause infinite loops. Adding it back gets rid of them. Smart initialization seems
+				# to be the way to ensure outlier choices are more stable and sane.
 
 				# Find self contribution, which is the log of the probability the data arose from the generating
 				# distribution of the kth community.
 				self_contribution = self.logP(self.S[i] if isinstance(self.S, numpy.ndarray) else self.S.iloc[i],
 					self.Theta[k])
-				#print(i, "self_contribution", self_contribution)
 
 				U = -self_contribution - self.lambda_*neighbors_contribution
 
@@ -231,19 +233,13 @@ class CODA:
 
 			Z_prev[:] = Z_t
 			for i in range(len(self.S)):
-				Z_t[i], U[i] = _energy_argmin(Z_t, i) # Z_prev to minimize propagation of single class in one loop
-
-			print("who:", Z_t)
-			print("U", U)
+				Z_t[i], U[i] = _energy_argmin(Z_t, i) # experimentally: must be Z_t rather than Z_prev to avoid getting stuck
 
 			# Have to order the energies and choose top n or top % as outliers
 			if n_outliers: # specify 0 or None to skip outlier assignment
 				top_n =	numpy.argsort(U)[-self.n_outliers:] if isinstance(self.n_outliers, int) \
 					else numpy.argsort(U)[-self.n_outliers*len(U):]
 				Z_t[top_n] = 0 # set the class of the top_n as 0, which means outlier
-
-			print("who:", Z_t)
-			print("whowho:", Z_prev)
 
 		return Z_t, U
 
@@ -338,5 +334,6 @@ class CODA:
 		# In order for e^distance to be a proper probability distribution, it has to be normalized, same as the
 		# multivariate Gaussian. Which means when we take the log, we get the determinant of Sigma in a separate term.
 		# Much like the univariate case, this keeps the algorithm from cheating by penalizing large Sigma.
-		return -numpy.log(numpy.sqrt(2*numpy.pi*numpy.linalg.det(Sigma + 1e-8))) - \
-			0.5*(s_i - mu).dot(numpy.linalg.inv(Sigma + 1e-8)).dot(s_i - mu)
+		det = numpy.linalg.det(Sigma) # A determinant < 0 is impossible, but apparently in numpy this can end up a tiny
+		if det <= 0: det = 1e-8				# negative number due to numerical drift
+		return -numpy.log(numpy.sqrt(2*numpy.pi*det)) -0.5*(s_i - mu).dot(numpy.linalg.pinv(Sigma)).dot(s_i - mu)
