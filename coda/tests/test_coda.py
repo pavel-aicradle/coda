@@ -49,6 +49,9 @@ for i in W_dict:
 	for j in W_dict[i]:
 		W2[i-1][j-1] = 1
 
+S3 = pandas.DataFrame({'color': ['blue', 'red', 'red', 'red', 'red', 'green', 'green', 'green', 'blue', 'blue',
+	'blue'], 'size': [10, 60, 40, 50, 55, 70, 90, 85, 25, 20, 30]})
+
 
 def test_paper_example_global():
 	# Run with no concern for neighbors. Should give us the global outlier, V1
@@ -145,6 +148,10 @@ def test_asymmetrical_influence():
 		return_all=True, n_runs=10)
 	Z, energy = model.run()
 
+	print("Z", Z)
+	print("energy", energy)
+	print("sum of energy", sum(energy))
+
 	if sum(energy) < 39: # V3 is now binding V2 more to the community, so V6 becomes the best choice
 		assert Z[5] == 0
 		assert Z[0] == Z[1] == Z[2] == Z[3] == Z[4]
@@ -166,3 +173,17 @@ def test_exceptions():
 			return_all=True, n_runs=10)
 
 
+def test_multiple_attributes():
+	# Run an example where there is more than one attribute per node, one categorical, one numerical
+	model = CODA(S3, W2, K=3, lambda_=1, n_outliers=1, generating_distribution='independent',
+		return_all=True, n_runs=3)
+	Z, energy = model.run()
+
+	print("Z", Z)
+	print("energy", energy)
+	print("sum of energy", sum(energy))
+
+	assert Z[0] == 0
+	assert Z[1] == Z[2] == Z[3] == Z[4]
+	assert Z[5] == Z[6] == Z[7]
+	assert Z[8] == Z[9] == Z[10]

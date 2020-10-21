@@ -134,15 +134,15 @@ class CODA:
 		for i in range(100): # Try 100 times to get a run where clusters don't completely devour each other
 			if self.verbose:
 				print('EM run', i)
-				j = 0
 
 			Z_prev = numpy.zeros(len(self.S)) # the point is just to be far from Z_t for first while loop condition check
 			if Z_t is None: # then give it a random assignment, approximately evenly split between all clusters
 				Z_t = numpy.arange(1, self.K+1)[numpy.arange(len(self.S)) % self.K]
 				numpy.random.shuffle(Z_t) # This is where all the randomness comes from. Everything else is deterministic.
 
-			while numpy.mean(Z_t != Z_prev) > 0.01: # Z_t not close enough to Z_prev. Here I'm saying no more than 1% can
-				#have different class. Is there a better cutoff for this iteration?
+			j = 0
+			while numpy.mean(Z_t != Z_prev) > 0.01 and j < 1000: # Z_t not close enough to Z_prev. Here I'm saying no
+				# more than 1% can have different class. Is there a better cutoff for this iteration?
 				Z_prev[:] = Z_t
 
 				if self.verbose:
@@ -162,7 +162,7 @@ class CODA:
 				if self.verbose:
 					print('Z_t post E step:', Z_t)
 					print('new sum of U:', sum(U))
-					j += 1
+				j += 1
 
 				# It's possible to drive one of the clusters extinct. This is bad. Start over. This usually only happens
 				# when starting from random assignments, very rarely when starting from pre-clusters.
