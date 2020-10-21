@@ -90,7 +90,7 @@ def test_paper_example_communities():
 def test_categorical_example_multinomial():
 	# generating distribution is such that the multinomial comes in to play
 	model = CODA(S2, W2, K=3, lambda_=0.4, n_outliers=1, generating_distribution='independent',
-		return_all=True)
+		return_all=True, verbose=True)
 	Z, energy = model.run()
 
 	print("Z", Z)
@@ -149,11 +149,20 @@ def test_asymmetrical_influence():
 		assert Z[5] == 0
 		assert Z[0] == Z[1] == Z[2] == Z[3] == Z[4]
 		assert Z[6] == Z[7] == Z[8] == Z[9]
-	else: # but some times V6 gets lumped with the other community, and
+	else: # Some times V6 gets lumped with the other community in preclustering
 		assert Z[0] == 0
 		assert Z[1] == Z[2] == Z[3] == Z[4]
 		assert Z[5] == Z[6] == Z[7] == Z[8] == Z[9]
 
 
+def test_exceptions():
+	# Just to hit the lines where I raise ValueErrors in initialization
+	with pytest.raises(ValueError):
+		model = CODA(S, W, K=2, lambda_=1, n_outliers=2.0, generating_distribution='distance',
+			return_all=True, n_runs=10)
+
+	with pytest.raises(ValueError):
+		model = CODA(S, W, K=2, lambda_=1, n_outliers=0.5, generating_distribution='not_a_category',
+			return_all=True, n_runs=10)
 
 
