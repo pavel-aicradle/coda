@@ -334,6 +334,6 @@ class CODA:
 		# In order for e^distance to be a proper probability distribution, it has to be normalized, same as the
 		# multivariate Gaussian. Which means when we take the log, we get the determinant of Sigma in a separate term.
 		# Much like the univariate case, this keeps the algorithm from cheating by penalizing large Sigma.
-		det = numpy.linalg.det(Sigma) # A determinant < 0 is impossible, but apparently in numpy this can end up a tiny
-		if det <= 0: det = 1e-8				# negative number due to numerical drift
+		det = numpy.linalg.det(Sigma) # A determinant < 0 is impossible for a positive semi-definite matrix like Sigma,
+		if det <= 0: det = 1e-20 # but apparently in numpy this can end up a tiny negative number due to numerical drift
 		return -numpy.log(numpy.sqrt(2*numpy.pi*det)) -0.5*(s_i - mu).dot(numpy.linalg.pinv(Sigma)).dot(s_i - mu)
