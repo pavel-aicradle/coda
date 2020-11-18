@@ -119,7 +119,11 @@ class CODA:
 				best_U = U
 				best_Z_t = Z_t
 
-		return best_Z_t, best_U if self.return_all else (numpy.where(Z_t == 0), U[numpy.where(Z_t == 0)])
+		if self.return_all:
+			return best_Z_t, best_U
+		else:
+			outlier_ndxs = numpy.where(Z_t == 0)[0]
+			return  outlier_ndxs, best_U[outlier_ndxs]
 
 
 	def _expectation_maximization(self, n_outliers: int, Z_t: numpy.ndarray=None):
@@ -173,7 +177,7 @@ class CODA:
 			else: return Z_t, U # has to be in else otherwise the break causes the function to return
 
 		raise StopIteration("Expectation Maximization is failing to find a starting point that doesn't result in " +
-				"communities swallowing each other. Try decreasing K.")
+				"communities swallowing each other. Try decreasing K or decreasing lambda_.")
 
 
 	def _icm(self, Z_t: numpy.ndarray, n_outliers: int) -> Tuple[numpy.ndarray, numpy.ndarray]:

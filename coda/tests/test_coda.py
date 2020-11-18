@@ -3,6 +3,7 @@
 import pytest
 import numpy
 import pandas
+from .synthetic import synthetic
 from ..coda import CODA
 
 
@@ -26,14 +27,13 @@ W = numpy.array([[0, 0, 1, 0, 0, 0, 0, 0, 0, 0], # 1 -> 3
 				 [0, 1, 0, 1, 0, 0, 0, 0, 0, 1], # 9 -> 2, 4, 10
 				 [0, 0, 0, 1, 0, 0, 0, 1, 1, 0]]) # 10 -> 4, 8, 9
 
-
 """I've engineered this example to be as cut-and-dried as possible. You have red nodes, blue nodes, and green nodes,
 and then you've got a blue node off to the side that's only connected to red nodes, which should always be the
 outlier.
 """
 S2 = pandas.DataFrame({'color': ['blue', 'red', 'red', 'red', 'red', 'green', 'green', 'green', 'blue', 'blue',
 	'blue']})
-W_dict = {1: [2,3,4],
+W_dict = {1: [2,3,4,9],
 		  2: [1,3,9],
 		  3: [1,2,4,5,10],
 		  4: [1,3,5],
@@ -41,7 +41,7 @@ W_dict = {1: [2,3,4],
 		  6: [5,7,8],
 		  7: [5,6,8],
 		  8: [6,7,11],
-		  9: [2,10,11],
+		  9: [1,2,10,11],
 		  10: [3,9,11],
 		  11: [5,8,9,10]}
 W2 = numpy.zeros((len(W_dict), len(W_dict)))
@@ -49,6 +49,7 @@ for i in W_dict:
 	for j in W_dict[i]:
 		W2[i-1][j-1] = 1
 
+# This is for trying with multiple kinds of attribute together, goes with W2
 S3 = pandas.DataFrame({'color': ['blue', 'red', 'red', 'red', 'red', 'green', 'green', 'green', 'blue', 'blue',
 	'blue'], 'size': [10, 60, 40, 50, 55, 70, 90, 85, 25, 20, 30]})
 
@@ -176,7 +177,7 @@ def test_exceptions():
 def test_multiple_attributes():
 	# Run an example where there is more than one attribute per node, one categorical, one numerical
 	model = CODA(S3, W2, K=3, lambda_=1, n_outliers=1, generating_distribution='independent',
-		return_all=True, n_runs=3)
+		return_all=False, n_runs=3)
 	Z, energy = model.run()
 
 	print("Z", Z)
@@ -187,3 +188,22 @@ def test_multiple_attributes():
 	assert Z[1] == Z[2] == Z[3] == Z[4]
 	assert Z[5] == Z[6] == Z[7]
 	assert Z[8] == Z[9] == Z[10]
+
+"""This generates a bunch of plots
+def test_on_synthetic():
+	S_, W_, outlier_ndxs = synthetic(100, 3, 10, outlier_type='far_away', show_plots=True)
+	print(S_)
+
+	from matplotlib import pyplot
+	fig = pyplot.figure()
+	ax = fig.add_subplot(111, projection='3d')
+	ax.scatter(S_[0], S_[1], S_[2])
+	pyplot.show()
+
+	model = CODA(S_, W_, K=3, lambda_=0.5, n_outliers=10, generating_distribution='distance',
+		return_all=False, n_runs=10, verbose=True)
+	ndxs, energy = model.run()
+
+	print("actual outliers:", sorted(outlier_ndxs))
+	print("found outliers:", sorted(ndxs))
+"""
